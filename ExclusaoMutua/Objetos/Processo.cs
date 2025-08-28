@@ -17,6 +17,7 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
     public Queue<Mensagem> FilaRequisicoes { get; set; } = new();
     public Recurso Recurso { get; set; } = recurso;
     public Thread? Requisitador { get; set; }
+    public bool UtilizandoRecurso { get; set; }
 
     public void IniciaProcesso(IPAddress ipAddress)
     {
@@ -167,7 +168,9 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
     {
         Console.WriteLine($"[Processo {Id}] Acesso concedido ao recurso {Recurso.Id} ({Recurso.Nome}). Utilizando recurso...");
         var random = new Random();
+        UtilizandoRecurso = true;
         Thread.Sleep(random.Next(5000, 15000));
+        UtilizandoRecurso = false;
         Console.WriteLine($"[Processo {Id}] Liberação do recurso {Recurso.Id} ({Recurso.Nome}) após uso.");
         AguardandoRecurso = false;
         EnviaRequisicaoLiberacao();
@@ -268,7 +271,8 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
                 {
                     RecebeCoordenador(mensagem.ProcessoId);
                     AguardandoRecurso = false;
-                    SolicitaRecurso(Recurso);
+                    if (!UtilizandoRecurso)
+                        SolicitaRecurso(Recurso);
                 }
                 else
                 {
