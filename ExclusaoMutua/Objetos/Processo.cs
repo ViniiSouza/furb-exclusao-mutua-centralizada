@@ -41,14 +41,82 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
         }
     }
 
+    public void EnviaRequisicaoUsoExpirado(int processoId)
+    {
+        using TcpClient client = new();
+        NetworkStream? stream = null;
+        string serverIp = "127.0.0.1";
+        int port = 5000 + processoId;
+        try
+        {
+            client.Connect(serverIp, port);
+            stream = client.GetStream();
+            string payload = string.Format(PADRAO_MENSAGEM, ETipoMensagem.Expiracao, Id, Recurso.Id);
+            byte[] data = System.Text.Encoding.UTF8.GetBytes(payload);
+            stream.Write(data, 0, data.Length);
+            Console.WriteLine($"[Processo {Id}] Enviou notificação de uso expirado do recurso {Recurso.Id} para o processo {processoId}.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Processo {Id}] Erro ao enviar notificação de uso expirado: {ex.Message}");
+        }
+        finally
+        {
+            stream?.Close();
+        }
+    }
+
+    public void ChecaTimeoutUso()
+    {
+        while (true)
+        {
+            if (Recurso.EmUso && Recurso.HoraInicioUso != DateTime.MinValue)
+            {
+                var tempoUso = DateTime.Now - Recurso.HoraInicioUso;
+                if (tempoUso.TotalSeconds > 25)
+                {
+                    Console.WriteLine($"[Processo {Id}] Timeout de uso do recurso {Recurso.Id} pelo processo {Recurso.IdProcessoUtilizando}. Forçando liberação.");
+                    Recurso.EmUso = false;
+                    EnviaRequisicaoUsoExpirado(Recurso.IdProcessoUtilizando);
+                    if (FilaRequisicoes.Count > 0)
+                    {
+                        var prox = FilaRequisicoes.Dequeue();
+                        Console.WriteLine($"[Processo {Id}] Concedendo recurso {Recurso.Id} ao próximo da fila: Processo {prox.ProcessoId}.");
+                        Recurso.EmUso = true;
+                        Recurso.IdProcessoUtilizando = prox.ProcessoId;
+                        Recurso.HoraInicioUso = DateTime.Now;
+                        EnviaRequisicaoConcessao(prox);
+                    }
+
+                }
+            }
+            Thread.Sleep(5000);
+        }
+    }
+
     public void RecebeCoordenador(int coordenadorId)
     {
         Coordenador = coordenadorId;
         if (Id == coordenadorId)
         {
             SouCoordenador = true;
-            Requisitador?.Interrupt();
+            FilaRequisicoes.Clear();
+            if (Recurso.IdProcessoUtilizando == Id)
+            {
+                UtilizandoRecurso = false;
+                Recurso.EmUso = false;
+            }
+
+            var thread = new Thread(() => ChecaTimeoutUso());
+            thread.Start();
         }
+        else
+        {
+            AguardandoRecurso = false;
+            if (!UtilizandoRecurso)
+                SolicitaRecurso(Recurso);
+        }
+           
         Console.WriteLine($"[Processo {Id}] Novo coordenador definido: {Coordenador}. Sou coordenador? {SouCoordenador}");
     }
 
@@ -57,10 +125,9 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
         var random = new Random();
         try
         {
-            while (true)
+            while (!SouCoordenador)
             {
                 SolicitaRecurso(Recurso);
-
                 Thread.Sleep(random.Next(10000, 25000));
             }
         }
@@ -189,8 +256,8 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
                 var partes = message.Split('_');
                 if (partes.Length >= 2 && Enum.TryParse(partes[0], out ETipoMensagem tipoMensagem) && int.TryParse(partes[1], out int processoId))
                 {
-                    long? recursoId = null;
-                    if (partes.Length == 3 && long.TryParse(partes[2], out long parsedRecursoId))
+                    int? recursoId = null;
+                    if (partes.Length == 3 && int.TryParse(partes[2], out int parsedRecursoId))
                         recursoId = parsedRecursoId;
 
                     var mensagem = new Mensagem(tipoMensagem, recursoId, processoId);
@@ -199,6 +266,8 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
                     if (tipoMensagem == ETipoMensagem.Requisicao && SouCoordenador && !Recurso.EmUso)
                     {
                         Recurso.EmUso = true;
+                        Recurso.IdProcessoUtilizando = processoId;
+                        Recurso.HoraInicioUso = DateTime.Now;
                         stream.Write(System.Text.Encoding.UTF8.GetBytes("available"), 0, "available".Length);
                     }
                     else
@@ -232,6 +301,8 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
                         // envia concessao
                         EnviaRequisicaoConcessao(concessao);
                         Recurso.EmUso = true;
+                        Recurso.HoraInicioUso = DateTime.Now;
+                        Recurso.IdProcessoUtilizando = mensagem.ProcessoId;
                     }
                     else
                     {
@@ -262,23 +333,24 @@ public class Processo(int id, int coordenadorId, Recurso recurso)
                         var prox = FilaRequisicoes.Dequeue();
                         Console.WriteLine($"[Processo {Id}] Concedendo recurso {Recurso.Id} ao próximo da fila: Processo {prox.ProcessoId}.");
                         Recurso.EmUso = true;
+                        Recurso.IdProcessoUtilizando = prox.ProcessoId;
+                        Recurso.HoraInicioUso = DateTime.Now;
                         EnviaRequisicaoConcessao(prox);
                     }
+                }
+                break;
+            case ETipoMensagem.Expiracao:
+                if (!SouCoordenador)
+                {
+                    Console.WriteLine($"[Processo {Id}] Notificação de uso expirado recebida. Recurso {Recurso.Id} liberado pelo coordenador.");
+                    UtilizandoRecurso = false;
+                    Recurso.EmUso = false;
                 }
                 break;
             case ETipoMensagem.NovoCoordenador:
                 if (Coordenador != mensagem.ProcessoId)
                 {
                     RecebeCoordenador(mensagem.ProcessoId);
-                    AguardandoRecurso = false;
-                    if (!UtilizandoRecurso)
-                        SolicitaRecurso(Recurso);
-                }
-                else
-                {
-                    FilaRequisicoes.Clear();
-                    Console.WriteLine($"[Processo {Id}] Processo {Id} é o novo coordenador.");
-                    SouCoordenador = true;
                 }
                 break;
         }
